@@ -56,6 +56,7 @@ enum PlexError: LocalizedError {
     case noServers
     case unreachable(String)
     case notPlayable
+    case transcoderTimeout
 
     var errorDescription: String? {
         switch self {
@@ -65,6 +66,7 @@ enum PlexError: LocalizedError {
         case .noServers: "No Plex Media Servers were found on your account."
         case .unreachable(let name): "Couldn’t connect to “\(name)”. Make sure the server is running and reachable."
         case .notPlayable: "This item has no playable media."
+        case .transcoderTimeout: "The server took too long to prepare this video. It may be busy; try again in a moment. Turning on hardware-accelerated streaming in the Plex server settings helps with 4K files."
         }
     }
 }

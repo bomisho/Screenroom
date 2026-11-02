@@ -69,7 +69,7 @@ struct PlayerWindow: View {
             .foregroundStyle(.white.opacity(0.85))
             .padding(40)
         default:
-            if player.isBuffering { ProgressView().controlSize(.large).tint(.white) }
+            if player.isBuffering || player.isPreparing { ProgressView().controlSize(.large).tint(.white) }
         }
     }
 

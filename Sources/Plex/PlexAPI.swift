@@ -128,8 +128,60 @@ struct PlexAPI {
     /// Asks the transcoder what it will do with a request. Also registers the session,
     /// as official clients do before requesting `start.m3u8`.
     func transcodeDecision(_ url: URL) async throws -> TranscodeDecision {
-        let data = try await HTTP.data(url, token: server.token)
+        let data = try await HTTP.data(url, token: server.token, extraHeaders: Self.streamingHeaders)
         return try JSONDecoder().decode(TranscodeDecisionResponse.self, from: data).container
+    }
+
+    /// The transcoder picks its output profile from X-Plex-Platform and has none for
+    /// visionOS (it answers 400), so streaming requests identify as iOS. Headers win over
+    /// the same values in the query string.
+    static let streamingHeaders = ["X-Plex-Platform": "iOS"]
+
+    /// Starts an HLS conversion and waits until the piece of video at `startAt` exists.
+    /// Returns the media playlist URL to hand to AVPlayer.
+    ///
+    /// The server only begins converting once the media playlist is requested, and answers
+    /// 404 for segments until the converter is running. AVPlayer treats those 404s as fatal
+    /// (CoreMedia -12889 / -12927), so we do the warm-up ourselves.
+    func prepareHLS(_ startURL: URL, startAt seconds: Double, timeout: TimeInterval = 60) async throws -> URL {
+        func lines(_ data: Data) -> [String] {
+            String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+        let master = lines(try await HTTP.data(startURL, token: server.token, extraHeaders: Self.streamingHeaders))
+        guard let variantPath = master.first(where: { !$0.isEmpty && !$0.hasPrefix("#") }),
+              let variant = URL(string: variantPath, relativeTo: startURL)?.absoluteURL
+        else { throw PlexError.notPlayable }
+
+        // Find the segment that covers the start position.
+        var elapsed = 0.0, duration = 0.0
+        var segmentPath: String?
+        for line in lines(try await HTTP.data(variant, token: server.token, extraHeaders: Self.streamingHeaders)) {
+            if line.hasPrefix("#EXTINF:") {
+                duration = Double(line.dropFirst(8).prefix { $0 != "," }) ?? 0
+            } else if !line.isEmpty, !line.hasPrefix("#") {
+                segmentPath = line
+                if elapsed + duration > seconds { break }
+                elapsed += duration
+            }
+        }
+        guard let segmentPath, let segment = URL(string: segmentPath, relativeTo: variant)?.absoluteURL else { return variant }
+
+        // Once the converter runs, a segment request waits until that segment is ready.
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            try Task.checkCancellation()
+            var request = URLRequest(url: segment, timeoutInterval: 30)
+            for (k, v) in PlexClientInfo.headers(token: server.token).merging(Self.streamingHeaders, uniquingKeysWith: { $1 }) {
+                request.setValue(v, forHTTPHeaderField: k)
+            }
+            request.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
+            if let (_, response) = try? await HTTP.session.data(for: request),
+               let code = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(code) {
+                return variant
+            }
+            guard Date() < deadline else { throw PlexError.transcoderTimeout }
+            try await Task.sleep(for: .milliseconds(500))
+        }
     }
 
     func stopTranscode(session: String) async throws {

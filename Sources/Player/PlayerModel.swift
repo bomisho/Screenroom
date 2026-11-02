@@ -37,6 +37,8 @@ final class PlayerModel {
     /// `nil` means subtitles are off.
     private(set) var selectedSubtitleID: Int?
     private(set) var isSwitchingTracks = false
+    /// Waiting for the server's converter to have the first video ready.
+    private(set) var isPreparing = false
     /// While a track menu is showing, the controls stay up.
     var isTrackMenuOpen = false
 
@@ -53,6 +55,7 @@ final class PlayerModel {
     private var serverProblem: String?
     private var serverDecision: TranscodeDecision?
     private var directPlayFailed = false
+    private var transcodeRetries = 0
     private var pendingStartSeconds: Double = 0
     private var didStartPlayback = false
     private var didScrobble = false
@@ -111,8 +114,12 @@ final class PlayerModel {
         let request = self.request
         teardownItemObservers()
 
+        // A restart replaces any conversion already running for us.
+        if let old = transcodeSession { Task { try? await api.stopTranscode(session: old) } }
+        transcodeSession = nil
+
         let route = try PlaybackDecider.route(for: item, api: api, subtitle: selectedSubtitle,
-                                              forceTranscode: forceTranscode || directPlayFailed)
+                                              startAt: seconds, forceTranscode: forceTranscode || directPlayFailed)
         let url: URL
         serverProblem = nil
         serverDecision = nil
@@ -122,7 +129,6 @@ final class PlayerModel {
             isTranscoding = false
             transcodeSession = nil
         case .transcode(let u, let session, let decision):
-            url = u
             isTranscoding = true
             transcodeSession = session
             // Registers the session and tells us why the server can't stream, if it can't.
@@ -133,6 +139,12 @@ final class PlayerModel {
             } catch {
                 serverProblem = "decision request failed: \(error.localizedDescription)"
             }
+            guard self.request == request else { return }
+            // Heavy files (4K HDR, lossless audio) take the converter a few seconds to start.
+            // AVPlayer gives up if the first pieces aren't there yet, so wait for them first.
+            isPreparing = true
+            defer { isPreparing = false }
+            url = try await api.prepareHLS(u, startAt: seconds)
             guard self.request == request else { return }
         }
 
@@ -185,7 +197,6 @@ final class PlayerModel {
             return
         }
         let resumeAt = currentTime
-        if let old = transcodeSession { try? await api.stopTranscode(session: old) }
         do {
             try await start(item: item, at: resumeAt, forceTranscode: true)
         } catch {
@@ -265,6 +276,8 @@ final class PlayerModel {
         transcodeSession = nil
         serverProblem = nil
         directPlayFailed = false
+        transcodeRetries = 0
+        isPreparing = false
         audioTracks = []
         subtitleTracks = []
         selectedAudioID = nil
@@ -357,8 +370,10 @@ final class PlayerModel {
     private func playbackFailed(_ playerItem: AVPlayerItem, error: Error?) {
         guard playerItem === player.currentItem else { return }
         // Direct play can fail on files AVPlayer doesn't like; fall back to the transcoder once.
-        if !isTranscoding, let item {
-            directPlayFailed = true
+        // A conversion can also stall (e.g. after a long seek on a busy server); restart it
+        // at the current position a couple of times before giving up.
+        if let item, !isTranscoding || transcodeRetries < 2 {
+            if isTranscoding { transcodeRetries += 1 } else { directPlayFailed = true }
             let resumeAt = max(currentTime, pendingStartSeconds)
             Task {
                 do { try await start(item: item, at: resumeAt, forceTranscode: true) } catch {

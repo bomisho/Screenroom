@@ -28,7 +28,7 @@ enum PlaybackDecider {
         subtitle.key == nil && directSubtitleCodecs.contains(subtitle.codec?.lowercased() ?? "")
     }
 
-    static func route(for item: PlexMetadata, api: PlexAPI, subtitle: PlexStream?, forceTranscode: Bool = false) throws -> Route {
+    static func route(for item: PlexMetadata, api: PlexAPI, subtitle: PlexStream?, startAt: Double = 0, forceTranscode: Bool = false) throws -> Route {
         guard let media = item.media?.first, let part = media.parts?.first else { throw PlexError.notPlayable }
 
         if !forceTranscode, canDirectPlay(media, subtitle: subtitle), let key = part.key {
@@ -53,7 +53,8 @@ enum PlaybackDecider {
             "subtitles": "burn",
             "location": api.server.isLocal ? "lan" : "wan",
             "session": session,
-            "offset": "0",
+            // Start converting at the resume point instead of at the beginning.
+            "offset": String(Int(max(0, startAt))),
             "copyts": "1",
             "mediaBufferSize": "102400",
             "X-Plex-Session-Identifier": session,
