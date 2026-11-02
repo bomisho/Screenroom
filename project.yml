@@ -1,0 +1,41 @@
+# Generate the Xcode project on a Mac with:  brew install xcodegen && xcodegen
+name: Theater
+options:
+  bundleIdPrefix: com.bomisho
+  deploymentTarget:
+    visionOS: "26.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+
+settings:
+  base:
+    # ---- Rename the app here (two lines) ----
+    APP_DISPLAY_NAME: Marquee
+    PRODUCT_BUNDLE_IDENTIFIER: com.bomisho.marquee
+    # -----------------------------------------
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+
+targets:
+  Theater:
+    type: application
+    platform: visionOS
+    sources:
+      - path: Sources
+      - path: Resources
+    settings:
+      base:
+        PRODUCT_NAME: Theater
+        TARGETED_DEVICE_FAMILY: "7"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: Resources/Info.plist
+        INFOPLIST_KEY_CFBundleDisplayName: $(APP_DISPLAY_NAME)
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "$(APP_DISPLAY_NAME) connects to Plex Media Servers on your local network so it can play your media."
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.entertainment
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
