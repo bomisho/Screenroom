@@ -30,6 +30,19 @@ final class PlayerModel {
     private(set) var videoAspect: Double = 16.0 / 9.0
     private(set) var isTranscoding = false
 
+    // Audio and subtitle tracks, as Plex describes them.
+    private(set) var audioTracks: [PlexStream] = []
+    private(set) var subtitleTracks: [PlexStream] = []
+    private(set) var selectedAudioID: Int?
+    /// `nil` means subtitles are off.
+    private(set) var selectedSubtitleID: Int?
+    private(set) var isSwitchingTracks = false
+    /// While a track menu is showing, the controls stay up.
+    var isTrackMenuOpen = false
+
+    /// Room dimmed for the theater-style view.
+    var isRoomDimmed = false
+
     /// Set by the player window so play buttons can reuse it.
     var isWindowOpen = false
 
@@ -37,6 +50,8 @@ final class PlayerModel {
     private var api: PlexAPI?
     private var request: PlayRequest?
     private var transcodeSession: String?
+    private var serverProblem: String?
+    private var directPlayFailed = false
     private var pendingStartSeconds: Double = 0
     private var didStartPlayback = false
     private var didScrobble = false
@@ -45,11 +60,14 @@ final class PlayerModel {
 
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var failObserver: NSObjectProtocol?
     private var observations: [NSKeyValueObservation] = []
 
     init() {
         // allowsExternalPlayback / preventsDisplaySleepDuringVideoPlayback are
         // unavailable on visionOS; the system manages both there.
+        // We choose tracks ourselves (from Plex's selection), so AVPlayer shouldn't override them.
+        player.appliesMediaSelectionCriteriaAutomatically = false
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     }
 
@@ -73,27 +91,41 @@ final class PlayerModel {
             if let m = item.media?.first, let w = m.width, let h = m.height, w > 0, h > 0 {
                 videoAspect = Double(w) / Double(h)
             }
-            try start(item: item, at: Double(request.startMs) / 1000, forceTranscode: false)
+            audioTracks = item.audioStreams
+            subtitleTracks = item.subtitleStreams
+            selectedAudioID = (audioTracks.first { $0.selected == true } ?? audioTracks.first)?.id
+            selectedSubtitleID = subtitleTracks.first { $0.selected == true }?.id
+            try await start(item: item, at: Double(request.startMs) / 1000, forceTranscode: false)
         } catch {
             status = .failed(error.localizedDescription)
         }
     }
 
-    private func start(item: PlexMetadata, at seconds: Double, forceTranscode: Bool) throws {
+    private var selectedSubtitle: PlexStream? {
+        subtitleTracks.first { $0.id == selectedSubtitleID }
+    }
+
+    private func start(item: PlexMetadata, at seconds: Double, forceTranscode: Bool) async throws {
         guard let api else { return }
+        let request = self.request
         teardownItemObservers()
 
-        let route = try PlaybackDecider.route(for: item, api: api, forceTranscode: forceTranscode)
+        let route = try PlaybackDecider.route(for: item, api: api, subtitle: selectedSubtitle,
+                                              forceTranscode: forceTranscode || directPlayFailed)
         let url: URL
+        serverProblem = nil
         switch route {
         case .direct(let u):
             url = u
             isTranscoding = false
             transcodeSession = nil
-        case .transcode(let u, let session):
+        case .transcode(let u, let session, let decision):
             url = u
             isTranscoding = true
             transcodeSession = session
+            // Registers the session and tells us why the server can't stream, if it can't.
+            do { serverProblem = try await api.transcodeDecision(decision).problem } catch {}
+            guard self.request == request else { return }
         }
 
         let asset = AVURLAsset(url: url)
@@ -104,6 +136,74 @@ final class PlayerModel {
         observe(playerItem)
         player.replaceCurrentItem(with: playerItem)
         if seconds <= 0 { player.play() }
+    }
+
+    // MARK: Tracks
+
+    func selectAudio(_ id: Int) async {
+        guard id != selectedAudioID else { return }
+        await changeTracks(audio: id, subtitle: selectedSubtitleID)
+    }
+
+    func selectSubtitle(_ id: Int?) async {
+        guard id != selectedSubtitleID else { return }
+        await changeTracks(audio: selectedAudioID, subtitle: id)
+    }
+
+    private func changeTracks(audio: Int?, subtitle: Int?) async {
+        guard let item, let api, let part = item.firstPart else { return }
+        let previous = (selectedAudioID, selectedSubtitleID)
+        selectedAudioID = audio
+        selectedSubtitleID = subtitle
+
+        // Direct play: switch inside the file when AVPlayer can.
+        let subtitleIsDirect = selectedSubtitle.map(PlaybackDecider.isDirectPlayable) ?? true
+        if !isTranscoding, subtitleIsDirect, await applyDirectSelection() { return }
+
+        // Otherwise save the choice on the server and restart through the transcoder,
+        // which burns in subtitles and mixes the chosen audio track.
+        isSwitchingTracks = true
+        defer { isSwitchingTracks = false }
+        do {
+            try await api.selectStreams(partID: part.id, audioStreamID: audio, subtitleStreamID: subtitle ?? 0)
+        } catch {
+            (selectedAudioID, selectedSubtitleID) = previous
+            return
+        }
+        let resumeAt = currentTime
+        if let old = transcodeSession { try? await api.stopTranscode(session: old) }
+        do {
+            try await start(item: item, at: resumeAt, forceTranscode: true)
+        } catch {
+            status = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Selects the chosen tracks in the file AVPlayer is reading directly.
+    /// Returns false when the file's tracks can't be matched to Plex's list.
+    private func applyDirectSelection() async -> Bool {
+        guard let playerItem = player.currentItem else { return false }
+        let asset = playerItem.asset
+
+        if audioTracks.count > 1, let audioID = selectedAudioID {
+            guard let group = try? await asset.loadMediaSelectionGroup(for: .audible),
+                  group.options.count == audioTracks.count,
+                  let position = audioTracks.firstIndex(where: { $0.id == audioID })
+            else { return false }
+            playerItem.select(group.options[position], in: group)
+        }
+
+        let embedded = subtitleTracks.filter(PlaybackDecider.isDirectPlayable)
+        let legible = try? await asset.loadMediaSelectionGroup(for: .legible)
+        if let subtitleID = selectedSubtitleID {
+            guard let legible, legible.options.count == embedded.count,
+                  let position = embedded.firstIndex(where: { $0.id == subtitleID })
+            else { return false }
+            playerItem.select(legible.options[position], in: legible)
+        } else if let legible, legible.allowsEmptySelection {
+            playerItem.select(nil, in: legible)
+        }
+        return true
     }
 
     // MARK: Transport
@@ -149,6 +249,13 @@ final class PlayerModel {
         currentTime = 0
         duration = 0
         transcodeSession = nil
+        serverProblem = nil
+        directPlayFailed = false
+        audioTracks = []
+        subtitleTracks = []
+        selectedAudioID = nil
+        selectedSubtitleID = nil
+        isSwitchingTracks = false
         didScrobble = false
         reportedState = ""
         videoAspect = 16.0 / 9.0
@@ -177,6 +284,12 @@ final class PlayerModel {
         endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification, object: playerItem, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.didReachEnd() }
         }
+
+        // Some files fail mid-stream rather than up front.
+        failObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.failedToPlayToEndTimeNotification, object: playerItem, queue: .main) { [weak self] note in
+            let error = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            MainActor.assumeIsolated { self?.playbackFailed(playerItem, error: error) }
+        }
     }
 
     private func teardownItemObservers() {
@@ -186,6 +299,8 @@ final class PlayerModel {
         timeObserver = nil
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
+        if let failObserver { NotificationCenter.default.removeObserver(failObserver) }
+        failObserver = nil
     }
 
     private func itemStatusChanged(_ playerItem: AVPlayerItem) {
@@ -204,20 +319,63 @@ final class PlayerModel {
                 } else {
                     player.play()
                 }
+                if !isTranscoding {
+                    Task { await applyInitialDirectSelection() }
+                }
             }
         case .failed:
-            // Direct play can fail on files AVPlayer doesn't like; fall back to the transcoder once.
-            if !isTranscoding, let item {
-                let resumeAt = max(currentTime, pendingStartSeconds)
-                do { try start(item: item, at: resumeAt, forceTranscode: true) } catch {
-                    status = .failed(error.localizedDescription)
-                }
-            } else {
-                status = .failed(playerItem.error?.localizedDescription ?? "Playback failed.")
-            }
+            playbackFailed(playerItem, error: playerItem.error)
         default:
             break
         }
+    }
+
+    /// Matches the file's tracks to Plex's selection; if a chosen subtitle can't be
+    /// shown this way, switch to the transcoder so it gets burned in.
+    private func applyInitialDirectSelection() async {
+        if await applyDirectSelection() { return }
+        guard selectedSubtitleID != nil, let item else { return }
+        do { try await start(item: item, at: currentTime, forceTranscode: true) } catch {
+            status = .failed(error.localizedDescription)
+        }
+    }
+
+    private func playbackFailed(_ playerItem: AVPlayerItem, error: Error?) {
+        guard playerItem === player.currentItem else { return }
+        // Direct play can fail on files AVPlayer doesn't like; fall back to the transcoder once.
+        if !isTranscoding, let item {
+            directPlayFailed = true
+            let resumeAt = max(currentTime, pendingStartSeconds)
+            Task {
+                do { try await start(item: item, at: resumeAt, forceTranscode: true) } catch {
+                    status = .failed(error.localizedDescription)
+                }
+            }
+            return
+        }
+        status = .failed(failureMessage(playerItem, error: error))
+    }
+
+    /// Plain-language reason plus the technical details that help diagnose a failure.
+    private func failureMessage(_ playerItem: AVPlayerItem, error: Error?) -> String {
+        var lines = ["This video couldn’t be played."]
+        if let serverProblem { lines.append("Server: \(serverProblem)") }
+        if let error = error ?? playerItem.error {
+            let ns = error as NSError
+            var detail = ns.localizedDescription
+            if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+                detail += " (\(underlying.domain) \(underlying.code))"
+            } else {
+                detail += " (\(ns.domain) \(ns.code))"
+            }
+            lines.append(detail)
+        }
+        if let event = playerItem.errorLog()?.events.last {
+            var log = "Stream error \(event.errorStatusCode)"
+            if let comment = event.errorComment { log += ": \(comment)" }
+            lines.append(log)
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func timeControlChanged(_ tc: AVPlayer.TimeControlStatus) {

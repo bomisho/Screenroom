@@ -33,5 +33,10 @@ struct TheaterApp: App {
         .windowStyle(.plain)
         .windowResizability(.contentSize)
         .defaultSize(width: 1600, height: 900)
+
+        ImmersiveSpace(id: SceneID.theater) {
+            DimmedRoom()
+        }
+        .immersionStyle(selection: .constant(.mixed), in: .mixed)
     }
 }

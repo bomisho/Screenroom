@@ -6,6 +6,8 @@ struct PlayerControls: View {
     var onInteract: () -> Void
 
     @Environment(PlayerModel.self) private var player
+    @Environment(\.openImmersiveSpace) private var openImmersiveSpace
+    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @State private var scrubValue: Double = 0
     @State private var isScrubbing = false
 
@@ -60,14 +62,93 @@ struct PlayerControls: View {
                 controlButton(player.isPlaying ? "pause.fill" : "play.fill", size: 34) { player.togglePlayPause() }
                 controlButton("goforward.10") { player.skip(by: 10) }
                 Spacer().frame(width: 40)
+                audioMenu
+                subtitleMenu
+                controlButton(player.isRoomDimmed ? "lightbulb.slash.fill" : "lightbulb") {
+                    Task { await toggleDimming() }
+                }
+                .accessibilityLabel(player.isRoomDimmed ? "Brighten room" : "Dim room")
                 controlButton("xmark") { onClose() }
             }
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 20)
-        .frame(width: 760)
+        .frame(width: 900)
         .background(.black.opacity(0.62), in: .rect(cornerRadius: 32))
         .overlay(RoundedRectangle(cornerRadius: 32).strokeBorder(.white.opacity(0.08)))
+    }
+
+    // MARK: Tracks
+
+    private var audioMenu: some View {
+        Menu {
+            Picker("Audio", selection: Binding(
+                get: { player.selectedAudioID },
+                set: { id in
+                    onInteract()
+                    if let id { Task { await player.selectAudio(id) } }
+                }
+            )) {
+                ForEach(player.audioTracks) { track in
+                    Text(track.label).tag(Optional(track.id))
+                }
+            }
+            .pickerStyle(.inline)
+            .onAppear { player.isTrackMenuOpen = true }
+            .onDisappear { player.isTrackMenuOpen = false; onInteract() }
+        } label: {
+            menuLabel("speaker.wave.2")
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .disabled(player.audioTracks.count < 2 || player.isSwitchingTracks)
+        .accessibilityLabel("Audio")
+    }
+
+    private var subtitleMenu: some View {
+        Menu {
+            Picker("Subtitles", selection: Binding(
+                get: { player.selectedSubtitleID },
+                set: { id in
+                    onInteract()
+                    Task { await player.selectSubtitle(id) }
+                }
+            )) {
+                Text("Off").tag(Int?.none)
+                ForEach(player.subtitleTracks) { track in
+                    Text(track.label).tag(Optional(track.id))
+                }
+            }
+            .pickerStyle(.inline)
+            .onAppear { player.isTrackMenuOpen = true }
+            .onDisappear { player.isTrackMenuOpen = false; onInteract() }
+        } label: {
+            menuLabel(player.selectedSubtitleID == nil ? "captions.bubble" : "captions.bubble.fill")
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .disabled(player.subtitleTracks.isEmpty || player.isSwitchingTracks)
+        .accessibilityLabel("Subtitles")
+    }
+
+    private func menuLabel(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 24, weight: .semibold))
+            .foregroundStyle(dim)
+            .frame(width: 60, height: 60)
+            .contentShape(.circle)
+            .hoverEffect(.highlight)
+    }
+
+    // MARK: Room
+
+    private func toggleDimming() async {
+        if player.isRoomDimmed {
+            await dismissImmersiveSpace()
+            player.isRoomDimmed = false
+        } else if case .opened = await openImmersiveSpace(id: SceneID.theater) {
+            player.isRoomDimmed = true
+        }
     }
 
     private func controlButton(_ symbol: String, size: CGFloat = 24, action: @escaping () -> Void) -> some View {

@@ -125,6 +125,13 @@ struct PlexAPI {
         ], extraHeaders: headers)
     }
 
+    /// Asks the transcoder what it will do with a request. Also registers the session,
+    /// as official clients do before requesting `start.m3u8`.
+    func transcodeDecision(_ url: URL) async throws -> TranscodeDecision {
+        let data = try await HTTP.data(url, token: server.token)
+        return try JSONDecoder().decode(TranscodeDecisionResponse.self, from: data).container
+    }
+
     func stopTranscode(session: String) async throws {
         try await send("/video/:/transcode/universal/stop", ["session": session])
     }
@@ -135,5 +142,25 @@ struct PlexAPI {
         if let audioStreamID { q["audioStreamID"] = "\(audioStreamID)" }
         if let subtitleStreamID { q["subtitleStreamID"] = "\(subtitleStreamID)" }
         try await send("/library/parts/\(partID)", q, method: "PUT")
+    }
+}
+
+struct TranscodeDecisionResponse: Decodable {
+    let container: TranscodeDecision
+    enum CodingKeys: String, CodingKey { case container = "MediaContainer" }
+}
+
+/// The server's explanation of how (or whether) it can stream an item.
+struct TranscodeDecision: Decodable {
+    let generalDecisionCode: Int?
+    let generalDecisionText: String?
+    let transcodeDecisionCode: Int?
+    let transcodeDecisionText: String?
+
+    /// A human-readable reason, if the server reported a problem.
+    var problem: String? {
+        if let code = generalDecisionCode, code >= 2000 { return generalDecisionText }
+        if let code = transcodeDecisionCode, code >= 2000 { return transcodeDecisionText }
+        return nil
     }
 }

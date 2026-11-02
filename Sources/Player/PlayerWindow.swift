@@ -9,6 +9,7 @@ struct PlayerWindow: View {
     @Environment(AppModel.self) private var model
     @Environment(PlayerModel.self) private var player
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
 
     @State private var controlsVisible = true
     @State private var hideTask: Task<Void, Never>?
@@ -41,7 +42,13 @@ struct PlayerWindow: View {
         .onDisappear {
             player.isWindowOpen = false
             hideTask?.cancel()
-            Task { await player.stop() }
+            Task {
+                await player.stop()
+                if player.isRoomDimmed {
+                    await dismissImmersiveSpace()
+                    player.isRoomDimmed = false
+                }
+            }
         }
         .onChange(of: player.isPlaying) { _, playing in
             if playing { scheduleHide() } else { showControls(toggle: false) }
@@ -80,7 +87,7 @@ struct PlayerWindow: View {
         hideTask?.cancel()
         hideTask = Task {
             try? await Task.sleep(for: .seconds(4))
-            guard !Task.isCancelled, player.isPlaying else { return }
+            guard !Task.isCancelled, player.isPlaying, !player.isTrackMenuOpen else { return }
             controlsVisible = false
         }
     }
