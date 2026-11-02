@@ -1,4 +1,4 @@
-# Marquee (working title)
+# Screenroom
 
 An original Apple Vision Pro app (visionOS 26) for watching movies and TV from your own Plex Media Server. It's written from scratch with Apple's frameworks (SwiftUI, AVKit/AVFoundation, RealityKit) and Plex's public web APIs. It has **no third-party dependencies**.
 
@@ -10,7 +10,7 @@ You need Xcode, an Apple Vision Pro paired with Xcode, and [Homebrew](https://br
 
 1. Open **Terminal** and go to the project folder (the folder that holds `project.yml`):
    ```sh
-   cd ~/Developer/<repo-name>
+   cd ~/Developer/Screenroom
    ```
 2. Install XcodeGen (one time only):
    ```sh
