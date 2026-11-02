@@ -48,8 +48,8 @@ final class PlayerModel {
     private var observations: [NSKeyValueObservation] = []
 
     init() {
-        player.allowsExternalPlayback = false
-        player.preventsDisplaySleepDuringVideoPlayback = true
+        // allowsExternalPlayback / preventsDisplaySleepDuringVideoPlayback are
+        // unavailable on visionOS; the system manages both there.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
     }
 
