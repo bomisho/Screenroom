@@ -51,6 +51,7 @@ final class PlayerModel {
     private var request: PlayRequest?
     private var transcodeSession: String?
     private var serverProblem: String?
+    private var serverDecision: TranscodeDecision?
     private var directPlayFailed = false
     private var pendingStartSeconds: Double = 0
     private var didStartPlayback = false
@@ -114,6 +115,7 @@ final class PlayerModel {
                                               forceTranscode: forceTranscode || directPlayFailed)
         let url: URL
         serverProblem = nil
+        serverDecision = nil
         switch route {
         case .direct(let u):
             url = u
@@ -124,11 +126,23 @@ final class PlayerModel {
             isTranscoding = true
             transcodeSession = session
             // Registers the session and tells us why the server can't stream, if it can't.
-            do { serverProblem = try await api.transcodeDecision(decision).problem } catch {}
+            do {
+                let d = try await api.transcodeDecision(decision)
+                serverDecision = d
+                serverProblem = d.problem
+            } catch {
+                serverProblem = "decision request failed: \(error.localizedDescription)"
+            }
             guard self.request == request else { return }
         }
 
-        let asset = AVURLAsset(url: url)
+        // Send Plex identity + token on every request, including the HLS playlists and
+        // segments the server links to with relative URLs (which drop our query string).
+        var headers = PlexClientInfo.headers(token: api.server.token)
+        headers["X-Plex-Platform"] = "iOS"
+        headers.removeValue(forKey: "Accept")
+        if let transcodeSession { headers["X-Plex-Session-Identifier"] = transcodeSession }
+        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
         let playerItem = AVPlayerItem(asset: asset)
         playerItem.preferredForwardBufferDuration = 0
         pendingStartSeconds = seconds
@@ -373,8 +387,24 @@ final class PlayerModel {
         if let event = playerItem.errorLog()?.events.last {
             var log = "Stream error \(event.errorStatusCode)"
             if let comment = event.errorComment { log += ": \(comment)" }
+            // Which request failed (path only, never the token).
+            if let uri = event.uri, let path = URLComponents(string: uri)?.path, !path.isEmpty {
+                log += " [\(path.split(separator: "/").suffix(2).joined(separator: "/"))]"
+            }
             lines.append(log)
         }
+        if let access = playerItem.accessLog()?.events.last {
+            let mb = Double(max(0, access.numberOfBytesTransferred)) / 1_000_000
+            lines.append(String(format: "Received %.1f MB", mb))
+        }
+        var media: [String] = [isTranscoding ? "Converting" : "Direct play"]
+        if let m = item?.media?.first {
+            media += [m.container, m.videoCodec, m.audioCodec, m.videoResolution].compactMap { $0 }
+        }
+        if let text = serverDecision?.transcodeDecisionText ?? serverDecision?.generalDecisionText {
+            media.append(text)
+        }
+        lines.append(media.joined(separator: " · "))
         return lines.joined(separator: "\n")
     }
 
